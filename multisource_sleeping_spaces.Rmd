@@ -1,0 +1,138 @@
+---
+title: "multisource_descriptives"
+output: html_document
+date: "2023-11-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(ggpubr)
+library(epiR)
+
+# set plotting theme
+theme_set(theme_bw() + 
+            theme(text = element_text(size = 15),
+                  strip.background = element_rect(fill = 'white', color = 'white')))
+
+model_dat_long <- read_csv("analysis/clean_data/data/model_dat_long.csv")
+```
+
+#### Do people who are part of multisource meals share sleeping spaces more often than people who are single-source meals?
+
+To do this, we can look at pairwise sleeping space sharing among hh members.
+
+Let's generate a pairwise df of hh members and whether they shared a sleeping space and/or a multisource bite
+```{r}
+hh_pairs <- model_dat_long |> 
+  select(person_id, h_hh) |> 
+  distinct() |> 
+  left_join(model_dat_long |> 
+              select(person_id, h_hh) |> 
+              distinct(), by = "h_hh") |> 
+  filter(person_id.x != person_id.y)  |> 
+  rowwise() |> 
+  mutate(name = toString(sort(c(person_id.x,person_id.y)))) %>% 
+  select(h_hh, name) %>% 
+  distinct() %>%
+  separate(name, into = c("person_id1", "person_id2"), sep = ", ") |> 
+  left_join(model_dat_long |> 
+              select(person_id, gender, age_cat, ss_id) |> 
+              distinct() |> 
+              rename(person_id1 = person_id,
+                     gender1 = gender,
+                     age_cat1 = age_cat,
+                     ss_id1 = ss_id) |> 
+              drop_na(), by = "person_id1") |> 
+  left_join(model_dat_long |> 
+              select(person_id, gender, age_cat, ss_id) |> 
+              distinct() |> 
+              rename(person_id2 = person_id,
+                     gender2 = gender,
+                     age_cat2 = age_cat,
+                     ss_id2 = ss_id) |> 
+              drop_na(), by = "person_id2") |> 
+  drop_na() |> 
+  mutate(share_ss = case_when(ss_id1 == ss_id2 ~ 1,
+                              ss_id1 != ss_id2 ~0)) |> 
+  left_join(model_dat_long |> 
+              filter(match == "yes") |> 
+              group_by(sample_id_mosquito) |> 
+              mutate(n = n()) |> 
+              filter(n > 1) |> 
+              select(sample_id_mosquito, person_id) |> 
+              group_by(sample_id_mosquito) |> 
+              arrange(person_id) |> 
+              mutate(person_num = row_number()) |> 
+              pivot_wider(names_from = person_num, values_from = person_id, names_prefix = "person_id"), by = c("person_id1", "person_id2")) |> 
+  mutate(share_multisource = case_when(is.na(sample_id_mosquito) ~ 0,
+                                       !is.na(sample_id_mosquito) ~ 1)) |>
+  select(-sample_id_mosquito) |> 
+  distinct() |> 
+  group_by(person_id1, person_id2) |> 
+  slice_max(share_multisource+share_ss, with_ties = FALSE) |> 
+  ungroup()
+```
+
+We could just look at the relative risk of being in a multisource meal for shared vs not sleeping space...
+
+```{r}
+hh_pairs %>%
+  mutate(share_ss = factor(share_ss, levels = c(1,0), labels = c("Shared sleeping space", "Did not share sleeping space")),
+         share_multisource = factor(share_multisource, levels = c(1,0), labels = c("Pair found in at least one multisource meal", "Pair not found in a multisource meal"))) %>%
+  group_by(share_ss, share_multisource) %>%
+  count() %>%
+  epi.2by2(units = 1)
+```
+
+So we see that hh member pairs who share a sleeping space are ~2.8x more likely to be found in a multisource meal than those who do not share a sleeping space.
+
+So what sort of hh members share sleeping spaces?
+
+```{r}
+indiv <- hh_pairs |> 
+  select(h_hh, person_id1, gender1, age_cat1, ss_id1, share_ss, share_multisource) |>
+  distinct() |>
+  rename(person_id = person_id1, 
+         gender = gender1,
+         age_cat = age_cat1,
+         ss_id = ss_id1) |> 
+  bind_rows(hh_pairs |>
+              select(h_hh, person_id2, gender2, age_cat2, ss_id2, share_ss, share_multisource) |>
+              distinct() |> 
+              rename(person_id = person_id2,
+                     gender = gender2,
+                     age_cat = age_cat2,
+                     ss_id = ss_id2)) |> 
+  distinct() |> 
+  group_by(person_id) |> 
+  slice_max(share_ss) |>
+  slice_max(share_multisource) 
+
+indiv |> 
+  mutate(gender = factor(gender, levels = c("Female", "Male")),
+         share_ss = factor(share_ss, levels = c(1,0), labels = c("Share sleeping space", "Do not share sleeping space"))) |> 
+  group_by(gender, share_ss) |> 
+  count() |> 
+  epi.2by2(units = 1)
+
+indiv |> 
+  mutate(age_cat = factor(age_cat, levels = c("<5", ">15")),
+         share_ss = factor(share_ss, levels = c(1,0), labels = c("Share sleeping space", "Do not share sleeping space"))) |> 
+  group_by(age_cat, share_ss) |> 
+  count() |> 
+  epi.2by2(units = 1)
+
+indiv |> 
+  mutate(age_cat = factor(age_cat, levels = c("5-15", ">15")),
+         share_ss = factor(share_ss, levels = c(1,0), labels = c("Share sleeping space", "Do not share sleeping space"))) |> 
+  group_by(age_cat, share_ss) |> 
+  count() |> 
+  epi.2by2(units = 1)
+
+```
+

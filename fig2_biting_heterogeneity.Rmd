@@ -1,0 +1,415 @@
+---
+title: "Biting heterogeneity"
+author: "Zena Lapp"
+date: "2023-10-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(glmmTMB)
+library(broom.mixed)
+library(DescTools)
+library(ggpubr)
+library(tidyverse)
+library(gtsummary)
+
+# set seed to be able to get same result for simulation
+set.seed(20231027)
+
+# set plotting theme
+theme_set(theme_bw() + 
+            theme(text = element_text(size = 15),
+                  strip.background = element_rect(fill = 'white', color = 'white')))
+
+matches <- read_csv('analysis/clean_data/data/mosquito_bistro.csv')
+
+hu_dat <- read_csv('analysis/clean_data/data/monthly_visits.csv') 
+
+all_hu <- hu_dat %>% 
+  pull(person_id) %>% 
+  unique()
+
+hu_bites <- matches %>% 
+  select(human_id) %>% 
+  drop_na() %>% 
+  rename(M_ID = human_id)
+
+no_bites <- all_hu[!all_hu %in% deframe(hu_bites)]
+
+bite_counts <- hu_bites %>% 
+  group_by(M_ID) %>% 
+  tally() %>% 
+  bind_rows(enframe(no_bites, value = 'M_ID') %>% 
+              select(M_ID) %>% 
+              mutate(n = 0))
+
+model_dat <- read_csv("analysis/clean_data/data/model_dat.csv") %>%
+  select(mosquito_collection_date, n_bites_person_hh_day, prop_bites_person_hh_day, bitten, n_str_mosq,
+         age_28feb2021, age_cat, gender, slept_net, transmission_season, 
+         hh_rdt_prev_30, rdt_pos_cat, pf_pcr_infection_status, collect_diff_visit,
+         n_mem_in_ss, n_people_hh_day, person_id, m_hh, m_village, hh_date) %>% 
+  mutate(slept_net = factor(slept_net, levels = c("No", "Yes")),
+         age_cat = factor(age_cat, levels = c('>15', '5-15', '<5')),
+         transmission_season = factor(transmission_season, levels = c('Low', 'High'))) %>%
+  drop_na() 
+
+model_dat_strict <- read_csv("analysis/clean_data/data/model_dat.csv") |> 
+  mutate(pf_pcr_infection_status = case_when(pf_before == 'negative' | pf_after == 'negative' ~ 'negative',
+                                             pf_before == 'positive' & pf_after == 'positive' ~ 'positive'))
+
+hu_pos <- read_csv("analysis/clean_data/data/hu_pos.csv")
+```
+
+# Biting heterogenetiy
+
+```{r}
+min_3 <- hu_dat %>%
+  group_by(person_id) %>%
+  count() %>%
+  filter(n >= 3) %>%
+  pull(person_id) %>%
+  unique()
+
+bite_counts_red <- bite_counts %>%
+  mutate(hh_id = substr(M_ID, 1, 3)) %>%
+  left_join(hu_dat %>% 
+              select(-M_ID) %>%
+              rename(M_ID = person_id) %>% 
+              group_by(M_ID) %>%
+              summarise(n_months = n())) %>% 
+  mutate(night_bites = n/n_months/2) %>% 
+  filter(n != 0 | (n == 0 & M_ID %in% min_3))
+```
+
+### Gini index
+```{r}
+gini <- Gini(bite_counts_red$night_bites, conf.level = 0.95) 
+gini
+```
+
+### Simulated gini 
+
+```{r}
+n_people <- n_distinct(bite_counts_red$M_ID)
+n_bites <- sum(bite_counts_red$n)
+
+bites_sim <- lapply(1:1000, function(x){
+  tibble(person = factor(sample(n_people, n_bites, prob = bite_counts_red$n_months*2, replace = TRUE), levels = 1:n_people)) %>% 
+    count(person, .drop = FALSE) %>% 
+    mutate(n_collections = bite_counts_red$n_months*2,
+           night_bites = n/n_collections,
+           perm = x)
+}) %>% bind_rows() %>% suppressMessages()
+
+bites_sim_summary <- bites_sim %>%
+  group_by(perm) %>% 
+  arrange(perm, night_bites) %>%
+  mutate(index = row_number(),
+         cum_bites = cumsum(night_bites)/sum(night_bites),
+         norm_index = as.numeric(index)/n()) %>% 
+  group_by(norm_index) %>% 
+  dplyr::summarize(med_bites = median(cum_bites),
+            lower = quantile(cum_bites, 0.025),
+            upper = quantile(cum_bites, 0.975))
+
+bites_sim_gini <- bites_sim %>% 
+  group_by(perm) %>% 
+  dplyr::summarize(gini = Gini(night_bites)) %>% 
+  ungroup() %>% 
+  dplyr::summarize(med_gini = median(gini),
+            lower = quantile(gini, 0.025),
+            upper = quantile(gini, 0.975))
+
+bites_sim_gini
+```
+
+# Household heterogeneity
+
+```{r}
+hh_bites <- bite_counts_red %>%
+  mutate(hh_id = gsub('_.*', '', M_ID)) %>% 
+  group_by(hh_id) %>%
+  mutate(n_hh = sum(n),
+         prop = case_when(n_hh == 0 ~ 0,
+                          n == 0 ~ 0,
+                          TRUE ~ n/n_hh),
+         num_mem = n()) %>%
+  arrange(n_hh, -n) %>%
+  mutate(M_ID = factor(M_ID, levels = unique(M_ID)),
+         mem_index = letters[row_number()]) %>%
+  ggplot(aes(x = forcats::fct_reorder(hh_id, -num_mem), y = mem_index, fill = n)) +
+  geom_bin2d(col = 'white') + 
+  scale_fill_gradient(low = "mistyrose", high = "indianred4", trans = "log10", na.value = "grey80") +
+  theme(axis.text.x = element_blank(), axis.text.y = element_blank()) +
+  labs(x = 'Household', y = 'Household member', fill = "Total bites\nobserved")
+```
+
+## Lorenz plot
+
+```{r}
+lorenz <- bite_counts_red %>%
+  arrange(night_bites) %>%
+  rownames_to_column(var = "index") %>%
+  mutate(cum_bites = cumsum(night_bites)/sum(night_bites),
+         norm_index = as.numeric(index)/nrow(.),) %>%
+  mutate(cum_bites_even = norm_index) %>% 
+  left_join(bites_sim_summary) %>% 
+  pivot_longer(c(cum_bites, med_bites, cum_bites_even), names_to = 'cum_bite_type', values_to = 'cum_bites') %>% 
+  mutate(lower = ifelse(cum_bite_type == 'med_bites', lower, NA),
+         upper = ifelse(cum_bite_type == 'med_bites', upper, NA),
+         cum_bite_type = factor(case_when(cum_bite_type == 'cum_bites' ~ 'Observed',
+                                   cum_bite_type == 'med_bites' ~ 'Random',
+                                   cum_bite_type == 'cum_bites_even' ~ 'Even')),
+         cum_bite_type = factor(cum_bite_type, 
+                                levels = c(levels(cum_bite_type)[1], levels(cum_bite_type)[3], levels(cum_bite_type)[2]))) %>% 
+  ggplot(aes(x = norm_index, linetype = cum_bite_type)) +
+  geom_area(aes(y = cum_bites, fill = cum_bite_type), position = 'identity', show.legend = FALSE) +
+  geom_line(aes(y = cum_bites), lwd = 0.8) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, show.legend = FALSE) +
+  scale_linetype_manual(values = rev(c('solid', 'dotted', 'dashed'))) + 
+  scale_fill_manual(values = c('grey90', 'grey90', 'grey50')) +
+  guides(linetype = guide_legend(override.aes = list(lwd=0.5))) +
+  labs(y = "Cumulative share\nof nightly bites", x = "Share of participants", 
+       linetype = 'Bite\ndistribution') 
+```
+
+
+# Risk factor analysis
+
+## Heatmap
+
+```{r}
+n_months_in_study <- hu_dat %>%
+  filter(person_id %in% unique(model_dat$person_id)) %>%
+  mutate(age_cat = factor(case_when(age_28feb2021 > 15 ~ '>15',
+                              age_28feb2021 < 5 ~ '<5',
+                              TRUE ~ '5-15'),
+                           levels = c('<5', '5-15', '>15'))) %>% 
+  rename(p_id = person_id) %>% 
+  rowwise() %>% 
+  # CHECK
+  mutate(pf_pcr_infection_status = (hu_pos %>% 
+           filter(p_id == person_id) %>% 
+           mutate(diff = abs(collection_date - visit_date_monthly)) %>%
+           arrange(desc(pf_pcr_infection_status)) %>% # if tie, pick positive
+           slice_min(diff, with_ties = FALSE) %>% # get closest regardless of before or after
+           pull(pf_pcr_infection_status))) %>% 
+  ungroup() %>% 
+  rename(person_id = p_id) %>% 
+  group_by(person_id, gender, age_cat, slept_net, pf_pcr_infection_status) %>% 
+  summarise(months_in_study = n())
+
+model_dat_person <- model_dat %>% 
+  group_by(person_id, gender, age_cat, slept_net, pf_pcr_infection_status) %>% 
+  summarise(n_bites = sum(n_bites_person_hh_day)) %>% 
+  left_join(n_months_in_study) %>% 
+  mutate(months_in_study = ifelse(is.na(months_in_study), 0, months_in_study)) %>% 
+  group_by(gender, age_cat, slept_net, pf_pcr_infection_status) %>% 
+  summarise(n_bites = sum(n_bites),
+            n_people = n_distinct(person_id),
+            n_months = sum(months_in_study),
+            bites_per_month = n_bites/n_months/2*30*n_people,
+            bites_per_person_month = n_bites/n_months/2*30,
+            bites_per_person_night = bites_per_person_month/30,
+            bites_per_person_year = bites_per_person_month*12) %>% 
+  mutate(slept_net = ifelse(slept_net == 'Yes', 'Net', 'No net'),
+         pf_pcr_infection_status = ifelse(pf_pcr_infection_status == 'positive', 'Pf inf', 'No Pf inf'),
+         age_cat = factor(paste0(age_cat, ' yrs'),
+                          levels = c('<5 yrs', '5-15 yrs', '>15 yrs')))
+
+rf_heatmap <- model_dat_person %>%
+  ggplot(aes(x = '', y = '', fill = bites_per_person_month)) +
+  facet_grid(fct_rev(gender) + fct_rev(age_cat) ~ slept_net + pf_pcr_infection_status) +
+  geom_point(size = 25, shape = 22, stroke = 0) +
+  geom_text(aes(label = signif(bites_per_person_month, 2)), color = "white") +
+  geom_text(aes(label = paste0('n=',n_months)), nudge_x = 0, nudge_y = 0.5, size = 3, vjust = 1, color = "white") +
+  scale_fill_viridis_c(begin = 0.05, end = 0.95) +
+  guides(color = 'none') +
+  theme_minimal() +
+  theme(panel.grid = element_blank()) +
+  labs(fill = 'Mean\nmonthly bites\nper person', x = '', y = '')
+```
+
+## Biting bias model
+
+```{r}
+model_dat |> 
+  select(bitten, age_cat, gender, slept_net, pf_pcr_infection_status, n_mem_in_ss, rdt_pos_cat,  n_people_hh_day, n_str_mosq, transmission_season) |> 
+  mutate(bitten = ifelse(bitten == 0, 'Not bitten', 'Bitten')) |> 
+  tbl_summary(by = bitten, type = list(n_mem_in_ss ~ 'continuous'),
+              label = list(age_cat ~ 'Age',
+                           gender ~ 'Gender',
+                           slept_net ~ 'Slept under net',
+                           pf_pcr_infection_status ~ 'Infected with P. falciparum',
+                           n_mem_in_ss ~ 'Number of people in sleeping space',
+                           rdt_pos_cat ~ 'RDT+ household member in prior month',
+                           n_people_hh_day ~ 'Number of people present in household',
+                           n_str_mosq ~ 'Number of STR-typed mosquitoes collected in household',
+                           transmission_season ~ 'Transmission season')) |> 
+  add_overall() |> 
+  add_p()
+```
+
+
+```{r}
+nb2 <- model_dat %>%
+  glmmTMB(n_bites_person_hh_day ~ age_cat + gender + slept_net + rdt_pos_cat + pf_pcr_infection_status + n_mem_in_ss + n_people_hh_day + n_str_mosq + transmission_season + (1|person_id),
+          family = nbinom2, 
+          data = .)
+
+forest_plot_dat <- nb2 %>% 
+  tidy(exp = TRUE, conf.int = TRUE) %>% 
+  filter(term != 'sd__(Intercept)' & term != '(Intercept)') %>% 
+  mutate(term = case_when(term == 'slept_netYes' ~ 'Slept under net',
+                          term == 'pf_pcr_infection_statuspositive' ~ 'Infected with\nP. falciparum',
+                          term == 'n_str_mosq' ~ 'Number of STR-typed\nmosquitoes in household',
+                          term == 'transmission_seasonHigh' ~ 'High transmission season',
+                          term == 'n_people_hh_day' ~ 'Number of household\nmembers',
+                          term == 'rdt_pos_catYes' ~ 'RDT+ household\nmember in prior month',
+                          term == 'n_mem_in_ss' ~ 'Number of people\nin sleeping space',
+                          term == 'genderMale' ~ 'Male',
+                          term == 'age_cat5-15' ~ '5-15 years old\n(vs. >15 years old)',
+                          term == 'age_cat<5' ~ '<5 years old\n(vs. >15 years old)',
+                          TRUE ~ term)) %>% 
+  mutate(adjustor = ifelse(term %in% c('High transmission season', 'Number of STR-typed\nmosquitoes in household', 'Number of household\nmembers', 'RDT+ household\nmember in prior month', 'Number of people\nin sleeping space'), "yes", "no"),
+         term = factor(term, levels = c('Infected with\nP. falciparum', 'Slept under net', '5-15 years old\n(vs. >15 years old)', '<5 years old\n(vs. >15 years old)', 'Male','Number of people\nin sleeping space', 'RDT+ household\nmember in prior month', 'Number of household\nmembers', 'Number of STR-typed\nmosquitoes in household', 'High transmission season')))
+
+forest_plot_dat |> 
+  mutate(term = factor(term, levels = rev(levels(term)))) |> 
+  arrange(term) |> 
+  mutate(est = paste0(round(estimate, 2), ' (', round(conf.low, 2), '-', round(conf.high, 2), ')')) |> 
+  select(term, est)
+```
+
+
+```{r}
+forest_plot <- forest_plot_dat %>%
+  filter(adjustor == 'no') |> 
+  ggplot(aes(x = estimate, xmin = conf.low, xmax = conf.high, y = term)) +
+  geom_vline(xintercept = 1, linetype = 'dotted') +
+  geom_pointrange() +
+  scale_x_continuous(trans = 'log', breaks = c(0, 0.25, 0.5, 1, 2)) +
+  geom_text(aes(label = paste0(round(estimate, 2), " (", round(conf.low,2), ", ", round(conf.high,2), ")")), x = 1.9) +
+    coord_cartesian(clip = 'off') +
+  labs(x = 'Biting Rate Ratio (BRR)', y = '', title = 'BRR (95% CI)') +
+  theme(strip.text = element_blank(), plot.margin = unit(c(1,8,1,0), "lines"), 
+        plot.title = element_text(size = 12, hjust = 4.35, face = "bold"))
+```
+
+
+# RFA plot
+
+```{r, fig.width=9, fig.height=7}
+(biting_het <- ggarrange(ggarrange(hh_bites,
+                                   lorenz,
+                                   widths = c(1,1.1),
+                                   labels = c('A', 'B')),
+                         ggarrange(rf_heatmap,
+                            forest_plot,
+                            widths = c(0.9,1),
+                            labels = c('C','D'),
+                            nrow = 1),
+                         nrow = 2,
+                         heights = c(1,1.3)))
+ 
+ggsave(plot = biting_het, filename = 'analysis/manuscript_figures/figures/biting_heterogeneity.png',
+       width = 9, height = 7)
+```
+
+
+## Sensitivity analyses
+
+```{r}
+# data dimensions
+date_thresh <- c(-28, -14, -7)
+names(date_thresh) <- c(-28, -14, -7)
+sapply(date_thresh, function(x){
+  model_dat %>%
+    filter(collect_diff_visit >= x) %>% 
+    nrow()
+})
+```
+
+```{r}
+date_thresh <- c(-28, -14, -7)
+names(date_thresh) <- c(-28, -14, -7)
+sapply(date_thresh, function(x){
+  model_dat %>%
+    filter(collect_diff_visit >= x) %>% 
+    group_by(age_cat) |> 
+    tally() |> 
+    deframe()
+})
+```
+
+
+```{r}
+sens_an <- lapply(c(-28, -14, -7), function(x){
+  model_dat %>%
+    filter(collect_diff_visit >= x) %>% 
+  glmmTMB(n_bites_person_hh_day ~ age_cat + gender + slept_net + rdt_pos_cat + pf_pcr_infection_status + n_mem_in_ss + n_people_hh_day + n_str_mosq + transmission_season + (1|person_id),
+          family = nbinom2,
+          data = .) %>%
+  tidy(exp = TRUE, conf.int = TRUE) %>%
+  filter(term != 'sd__(Intercept)' & term != '(Intercept)') %>%
+  mutate(term = case_when(term == 'slept_netYes' ~ 'Slept under net',
+                          term == 'rdt_pos_catYes' ~ 'RDT+ household member\nin prior month',
+                          term == 'pf_pcr_infection_statuspositive' ~ 'Infected with\nP. falciparum',
+                          term == 'n_str_mosq' ~ 'Number of STR-typed\nmosquitoes in household',
+                          term == 'transmission_seasonHigh' ~ 'High transmission season',
+                          term == 'n_people_hh_day' ~ 'Number of household\nmembers',
+                          term == 'n_mem_in_ss' ~ 'Number of people\nin sleeping space',
+                          term == 'genderMale' ~ 'Male',
+                          term == 'age_cat5-15' ~ '5-15 years old\n(vs. >15 years old)',
+                          term == 'age_cat<5' ~ '<5 years old\n(vs. >15 years old)',
+                          TRUE ~ term)) %>%
+  mutate(adjustor = ifelse(term %in% c('High transmission season', 'Number of STR-typed\nmosquitoes in household', 'Number of household\nmembers', 'Number of people\nin sleeping space'), "yes", "no"),
+         term = factor(term, levels = c('RDT+ household member\nin prior month', 'Infected with\nP. falciparum', 'Slept under net', '5-15 years old\n(vs. >15 years old)', '<5 years old\n(vs. >15 years old)', 'Male','Number of people\nin sleeping space', 'Number of household\nmembers', 'Number of STR-typed\nmosquitoes in household', 'High transmission season'))) |>
+  mutate(term = factor(term, levels = rev(levels(term)))) |>
+  arrange(term) |>
+  mutate(est = paste0(round(estimate, 2), ' (', round(conf.low, 2), '-', round(conf.high, 2), ')')) |>
+  select(term, est) |>
+    mutate(earliest_pf_date = x)
+}) |> bind_rows()
+```
+
+
+```{r}
+sens_an_strict <- model_dat_strict %>%
+  mutate(slept_net = factor(slept_net, levels = c("No", "Yes")),
+         age_cat = factor(age_cat, levels = c('>15', '5-15', '<5')),
+          transmission_season = factor(transmission_season, levels = c('Low', 'High'))) |> 
+  select(n_bites_person_hh_day, age_cat, gender, slept_net, rdt_pos_cat, pf_pcr_infection_status, n_mem_in_ss, n_people_hh_day, n_str_mosq, transmission_season, person_id) |> 
+  drop_na() %>%
+  glmmTMB(n_bites_person_hh_day ~ age_cat + gender + slept_net + rdt_pos_cat + pf_pcr_infection_status + n_mem_in_ss + n_people_hh_day + n_str_mosq + transmission_season + (1|person_id),
+          family = nbinom2, 
+          data = .) %>% 
+  tidy(exp = TRUE, conf.int = TRUE) %>% 
+  filter(term != 'sd__(Intercept)' & term != '(Intercept)') %>% 
+  mutate(term = case_when(term == 'slept_netYes' ~ 'Slept under net',
+                          term == 'rdt_pos_catYes' ~ 'RDT+ household member\nin prior month',
+                          term == 'pf_pcr_infection_statuspositive' ~ 'Infected with\nP. falciparum',
+                          term == 'n_str_mosq' ~ 'Number of STR-typed\nmosquitoes in household',
+                          term == 'transmission_seasonHigh' ~ 'High transmission season',
+                          term == 'n_people_hh_day' ~ 'Number of household\nmembers',
+                          term == 'n_mem_in_ss' ~ 'Number of people\nin sleeping space',
+                          term == 'genderMale' ~ 'Male',
+                          term == 'age_cat5-15' ~ '5-15 years old\n(vs. >15 years old)',
+                          term == 'age_cat<5' ~ '<5 years old\n(vs. >15 years old)',
+                          TRUE ~ term)) %>% 
+  mutate(adjustor = ifelse(term %in% c('High transmission season', 'Number of STR-typed\nmosquitoes in household', 'Number of household\nmembers', 'Number of people\nin sleeping space'), "yes", "no"),
+         term = factor(term, levels = c('RDT+ household member\nin prior month', 'Infected with\nP. falciparum', 'Slept under net', '5-15 years old\n(vs. >15 years old)', '<5 years old\n(vs. >15 years old)', 'Male','Number of people\nin sleeping space', 'Number of household\nmembers', 'Number of STR-typed\nmosquitoes in household', 'High transmission season'))) |> 
+  mutate(term = factor(term, levels = rev(levels(term)))) |> 
+  arrange(term) |> 
+  mutate(est = paste0(round(estimate, 2), ' (', round(conf.low, 2), '-', round(conf.high, 2), ')')) |> 
+  select(term, est)
+```
+
+
+```{r}
+sens_an |> bind_rows(sens_an_strict) |> pivot_wider(names_from = earliest_pf_date, names_prefix = 'earliest pf date: ', values_from = est)
+```

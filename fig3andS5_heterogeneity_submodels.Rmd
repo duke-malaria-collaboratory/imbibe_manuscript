@@ -1,0 +1,257 @@
+---
+title: "Transmission reservoir"
+author: "C Markwalter"
+date: "2023-10-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Packages and data
+
+```{r}
+library(biostat3)
+library(tidyverse)
+library(glmmTMB)
+library(broom.mixed)
+library(ggmosaic)
+library(ggpubr)
+
+# set plotting theme
+theme_set(theme_bw() + 
+            theme(text = element_text(size = 15),
+                  strip.background = element_rect(fill = 'white', color = 'white')))
+
+# infected people
+model_dat_inf <- read_csv("analysis/clean_data/data/model_dat_infected_people.csv") |> 
+  mutate(slept_net = factor(slept_net, levels = c("No", "Yes")),
+         age_cat = factor(age_cat, levels = c('>15', '5-15', '<5')),
+         transmission_season = factor(transmission_season, levels = c('Low', 'High'))) %>% 
+  select(mosquito_collection_date, n_bites_person_hh_day, prop_bites_person_hh_day, bitten, n_str_mosq,
+         age_28feb2021, age_cat, gender, slept_net, rdt_pos_cat, pf_pcr_infection_status, transmission_season, 
+         n_mem_in_ss, n_people_hh_day, person_id, m_hh, m_village, hh_date) %>% 
+  drop_na() 
+
+# infected mosquitoes
+model_dat_infmoz <- read_csv("analysis/clean_data/data/model_dat_long.csv") |> 
+  filter(moz_head_pf_status == 'positive') |> 
+    group_by(person_id, m_hh, mosquito_collection_date, m_village, age_cat, gender,
+             slept_net, rdt_pos_cat, n_mem_in_ss, transmission_season, 
+             pf_pcr_infection_status, h_village, n_str_mosq, hh_date) %>% 
+    summarise(n_bites_person_hh_day = sum(match == 'yes')) %>% 
+    group_by(mosquito_collection_date, m_hh) %>% 
+    mutate(bitten = ifelse(n_bites_person_hh_day == 0, 0, 1),
+           n_people_hh_day = n(),
+           n_bites_hh_day = sum(n_bites_person_hh_day),
+           prop_bites_person_hh_day = n_bites_person_hh_day/n_bites_hh_day) %>% 
+    ungroup() |> 
+  drop_na() |> 
+  mutate(slept_net = factor(slept_net, levels = c("No", "Yes")),
+         age_cat = factor(age_cat, levels = c('>15', '5-15', '<5')),
+         transmission_season = factor(transmission_season, levels = c('Low', 'High')))
+```
+### Infected people only
+
+Alright, our goal here is to make a mosaic plot of the relative biting rates in different demographic groups. Then we can project the estimated transmission efficiency onto that plot to estimate the reservoir.
+
+```{r}
+nb_out_infpeople <- glmmTMB(n_bites_person_hh_day ~ age_cat + gender + slept_net + rdt_pos_cat + n_mem_in_ss + n_people_hh_day + n_str_mosq + transmission_season + (1|person_id),
+                 family = nbinom2,
+                 data = model_dat_inf)
+
+forest_plot_infpeople <- nb_out_infpeople %>% 
+  tidy(exp = TRUE, conf.int = TRUE) %>% 
+  filter(term != 'sd__(Intercept)' & term != '(Intercept)') %>% 
+  mutate(term = case_when(term == 'slept_netYes' ~ 'Slept under net',
+                          term == 'rdt_pos_catYes' ~ 'RDT+ household member\nin prior month',
+                          term == 'pf_pcr_infection_statuspositive' ~ 'Infected with\nP. falciparum',
+                          term == 'n_str_mosq' ~ 'Number of STR-typed\nmosquitoes in household',
+                          term == 'transmission_seasonHigh' ~ 'High transmission season',
+                          term == 'n_people_hh_day' ~ 'Number of household\nmembers',
+                          term == 'n_mem_in_ss' ~ 'Number of people\nin sleeping space',
+                          term == 'genderMale' ~ 'Male',
+                          term == 'age_cat5-15' ~ '5-15 years old\n(vs. >15 years old)',
+                          term == 'age_cat<5' ~ '<5 years old\n(vs. >15 years old)',
+                          TRUE ~ term)) %>% 
+  mutate(adjustor = ifelse(term %in% c('High transmission season', 'Number of STR-typed\nmosquitoes in household', 'Number of household\nmembers', 'RDT+ household member\nin prior month', 'Number of people\nin sleeping space'), "yes", "no"),
+         term = factor(term, levels = c('Infected with\nP. falciparum', 'Slept under net', '5-15 years old\n(vs. >15 years old)', '<5 years old\n(vs. >15 years old)', 'Male','Number of people\nin sleeping space', 'RDT+ household member\nin prior month', 'Number of household\nmembers', 'Number of STR-typed\nmosquitoes in household', 'High transmission season'))) %>%
+  filter(adjustor == 'no') |> 
+  ggplot(aes(x = estimate, xmin = conf.low, xmax = conf.high, y = term)) +
+  geom_vline(xintercept = 1, linetype = 'dotted') +
+  geom_pointrange() +
+  scale_x_continuous(trans = 'log', breaks = c(0, 0.25, 0.5, 1, 2)) +
+  geom_text(aes(label = paste0(round(estimate, 2), " (", round(conf.low,2), ", ", round(conf.high,2), ")")), x = 1.35) +
+  labs(x = 'Biting Rate Ratio (BRR)', y = '', subtitle = "BRR (95% CI)") +
+  coord_cartesian(clip = 'off') +
+  theme(strip.text = element_blank(), plot.margin = unit(c(1,10,1,1), "lines"), 
+        plot.subtitle = element_text(size = 12, hjust = 1.65, face = "bold"))
+
+forest_plot_infpeople
+```
+
+Let's pull out the biting rate ratios and confidence intervals
+
+```{r}
+nb_out_data <- nb_out_infpeople %>%
+  tidy(exp = TRUE, conf.int = TRUE)
+```
+
+So for each age/gender group, we want to understand the following: among infected people, what are the relative biting rates? So let's get stratum-specific biting rates for each of those 6 groups.
+
+First let me compare the fitted biting rates to the actual biting rates.
+
+```{r}
+augment(nb_out_infpeople) %>%
+  mutate(pred_night_bites = exp(.fitted)) %>%
+  ggplot(aes(x = n_bites_person_hh_day, y = pred_night_bites)) +
+  geom_point()
+
+```
+
+Seems reasonable enough. Now let's get the predicted proportion of bites for each infected group. We'll do this by finding the model-fitted nightly bites for each person-night at risk, calculating the nights at risk for each group and the mean nightly biting rate, getting the estimated total bites per group, and then finding the overall proportion of bites for each group.
+
+```{r}
+mosaic_data <- augment(nb_out_infpeople) %>%
+  mutate(pred_night_bites = exp(.fitted)) %>%
+  group_by(gender, age_cat, slept_net) %>%
+  summarise(nights_at_risk = n(),
+            mean_nightly_br = mean(pred_night_bites),
+            est_bites = nights_at_risk * mean_nightly_br) %>%
+  ungroup() %>%
+  mutate(tot_bites = sum(est_bites),
+         prop_bites = est_bites/tot_bites)
+
+mosaic_data
+
+```
+
+```{r}
+mosaic <- mosaic_data %>%
+  mutate(prop_bites = round(prop_bites,2),
+         slept_net = factor(slept_net, levels = c("Yes", "No"))) %>%
+  ggplot() +
+  geom_mosaic(aes(weight = prop_bites,
+                  x = product(slept_net, age_cat, gender),
+                  fill = age_cat,
+                  alpha = slept_net),
+              divider = mosaic("h")) +
+  geom_mosaic_text(aes(weight = prop_bites,
+                       x = product(slept_net, age_cat, gender), label = after_stat(.wt))) +
+  scale_x_productlist(labels = c("", "Female","", "Male")) +
+  labs(x = "Gender", y = "Age (years)", alpha = "Slept\nunder net") +
+  scale_fill_manual(values = c("#ffbe4f", "#0ea7b5", "#e8702a"), guide = "none")+
+  scale_alpha_manual(values = c(0.3,1))+
+  theme_mosaic() +
+  theme(axis.ticks = element_blank(), axis.text.x = element_text(hjust = 1, vjust = 5), axis.text.y = element_text(hjust = 1.8))
+```
+
+### Infected mozzies only
+
+```{r}
+nb_out_infmoz <- glmmTMB(n_bites_person_hh_day ~ age_cat + gender + slept_net + rdt_pos_cat + pf_pcr_infection_status + n_mem_in_ss + n_people_hh_day + n_str_mosq + transmission_season + (1|person_id),
+          family = nbinom2, 
+          data = model_dat_infmoz)
+
+forest_plot_infmoz <- nb_out_infmoz %>% 
+  tidy(exp = TRUE, conf.int = TRUE) %>% 
+  filter(term != 'sd__(Intercept)' & term != '(Intercept)') %>% 
+  mutate(term = case_when(term == 'slept_netYes' ~ 'Slept under net',
+                          term == 'rdt_pos_catYes' ~ 'RDT+ household member\nin prior month',
+                          term == 'pf_pcr_infection_statuspositive' ~ 'Infected with\nP. falciparum',
+                          term == 'n_str_mosq' ~ 'Number of STR-typed\nmosquitoes in household',
+                          term == 'transmission_seasonHigh' ~ 'High transmission season',
+                          term == 'n_people_hh_day' ~ 'Number of household\nmembers',
+                          term == 'n_mem_in_ss' ~ 'Number of people\nin sleeping space',
+                          term == 'genderMale' ~ 'Male',
+                          term == 'age_cat5-15' ~ '5-15 years old\n(vs. >15 years old)',
+                          term == 'age_cat<5' ~ '<5 years old\n(vs. >15 years old)',
+                          TRUE ~ term)) %>% 
+  mutate(adjustor = ifelse(term %in% c('High transmission season', 'Number of STR-typed\nmosquitoes in household', 'Number of household\nmembers', 'RDT+ household member\nin prior month', 'Number of people\nin sleeping space'), "yes", "no"),
+         term = factor(term, levels = c('Infected with\nP. falciparum', 'Slept under net', '5-15 years old\n(vs. >15 years old)', '<5 years old\n(vs. >15 years old)', 'Male','Number of people\nin sleeping space', 'RDT+ household member\nin prior month', 'Number of household\nmembers', 'Number of STR-typed\nmosquitoes in household', 'High transmission season'))) %>%
+  filter(adjustor == 'no') |> 
+  ggplot(aes(x = estimate, xmin = conf.low, xmax = conf.high, y = term)) +
+  geom_vline(xintercept = 1, linetype = 'dotted') +
+  geom_pointrange() +
+  scale_x_continuous(trans = 'log', breaks = c(0, 0.25, 0.5, 1, 2)) +
+  geom_text(aes(label = paste0(round(estimate, 2), " (", round(conf.low,2), ", ", round(conf.high,2), ")")), x = 2.2) +
+  labs(x = 'Biting Rate Ratio (BRR)', y = '', subtitle = "BRR (95% CI)") +
+  coord_cartesian(clip = 'off') +
+  theme(strip.text = element_blank(), plot.margin = unit(c(1,10,1,1), "lines"), 
+        plot.subtitle = element_text(size = 12, hjust = 1.65, face = "bold"))
+```
+
+```{r}
+nb_out_infmoz |> 
+  tidy(exp = TRUE, conf.int = TRUE)
+```
+
+
+Now let's get the predicted proportion of bites for each infected group. We'll do this by finding the model-fitted nightly bites for each person-night at risk, calculating the nights at risk for each group and the mean nightly biting rate, getting the estimated total bites per group, and then finding the overall proportion of bites for each group.
+
+```{r}
+mosaic_data_infmoz <- augment(nb_out_infmoz) %>%
+  mutate(pred_night_bites = exp(.fitted)) %>%
+  group_by(gender, age_cat, slept_net, pf_pcr_infection_status) %>%
+  summarise(nights_at_risk = n(),
+            mean_nightly_br = mean(pred_night_bites),
+            est_bites = nights_at_risk * mean_nightly_br) %>%
+  ungroup() %>%
+  mutate(tot_bites = sum(est_bites),
+         prop_bites = est_bites/tot_bites)
+
+mosaic_data_infmoz
+```
+
+```{r}
+mosaic_data_infmoz |> 
+  select(gender, age_cat, slept_net, pf_pcr_infection_status, prop_bites) |> 
+  arrange(-prop_bites) |> 
+  mutate(times_more = prop_bites/lead(prop_bites))
+```
+
+```{r}
+plot_infmoz <- mosaic_data_infmoz %>%
+  mutate(prop_bites = round(prop_bites,2),
+         slept_net = factor(slept_net, levels = c("Yes", "No")),
+         pf_pcr_infection_status = factor(ifelse(pf_pcr_infection_status == 'positive', 'Yes', 'No'), levels = c('Yes', 'No'))) |> 
+  ggplot(aes(x = pf_pcr_infection_status, fill = age_cat, alpha = slept_net, y = prop_bites)) +
+  facet_grid(gender~age_cat, scales = 'free', space = 'free') +
+  geom_col(fill = 'white', alpha = 1) +
+  geom_col() +
+    scale_fill_manual(values = c("#ffbe4f", "#0ea7b5", "#e8702a"), guide = 'none') +
+  scale_alpha_manual(values = c(0.3,1)) +
+  scale_y_continuous(breaks = seq(0, 0.5, 0.1)) +
+  labs(x = "Person infected with P. falciparum", y = 'Predicted proportion of infectious bites', alpha = "Slept\nunder net")
+```
+
+### Combining them together
+
+```{r, fig.width=14, fig.height=5}
+(forest_plots <- ggarrange(forest_plot_infpeople +
+                          labs(title = 'Human-to-mosquito transmission:\nall bites on infected people') +
+                          theme(plot.title = element_text(size = 13, face = 'bold')), 
+                        forest_plot_infmoz +
+                          labs(title = 'Mosquito-to-human tranmsission:\ninfectious bites on all people (EIR)') +
+                          theme(plot.title = element_text(size = 13, face = 'bold')), 
+                        labels = 'AUTO'))
+
+ggsave(plot = forest_plots,
+       filename = 'analysis/manuscript_figures/figures/inf_sub_models.png', width = 14, height = 5)
+```
+
+
+```{r, fig.width=10, fig.height=5}
+(inf_plot <- ggarrange(mosaic + 
+                    guides(alpha = guide_legend(title.hjust = 1, title = 'Slept under net', title.position = 'top')) +
+                      labs(title = 'Human-to-mosquito transmission:\nall bites on infected people'), 
+                  plot_infmoz + 
+                    labs(title = 'Mosquito-to-human transmission:\ninfectious bites on all people (EIR)') +
+                    theme_bw() +
+                    theme(strip.background = element_rect(fill = 'white', color = 'white')), 
+                  
+                    common.legend = TRUE, legend = 'bottom', labels = 'AUTO'))
+
+ggsave(plot = inf_plot, filename = "analysis/manuscript_figures/figures/inf_sub_plots.png", width = 10, height = 5)
+```

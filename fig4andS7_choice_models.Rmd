@@ -1,0 +1,407 @@
+---
+title: "Discrete choice models"
+author: "C Markwalter"
+date: "2023-10-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries and data
+```{r}
+library(biostat3)
+library(tidyverse)
+library(mlogit)
+library(broom)
+library(ggeffects)
+library(ggpubr)
+
+model_dat_long <- read_csv("analysis/clean_data/data/model_dat_long.csv")
+```
+
+# Function for shaping data
+
+Note: the scalar for determining sporozoite load comes from the following scalars:
+
+Going to convert our ng/ul concentrations to genomes in order to get more relevant units on our spz densities. This conversion is based on the following:
+
+1 pg ~ 978 Mbp
+Pf genome 22.8 Mbp
+1 ul template -> units are ng
+
+So 1 ng = 1000 pg * 978 Mbp/pg * 1 genome/22.8 Mbp = 42894.74 genomes
+
+```{r}
+
+get_modeldat <- function(df, hu_var){
+  
+  # reshaping multisource
+  
+  # first duplicate all the 0's
+  multi_no_match <- df %>%
+        select(sample_id_mosquito, match, age_cat, gender, slept_net, pf_pcr_infection_status, moz_head_pf_density, moz_head_pf_status, species, missing_data, multisource, locus_count) %>%
+      filter(species %in% c("An. funestus", "An. gambiae SS")) %>% 
+      mutate(moz_head_pf_density = case_when(is.na(moz_head_pf_density) & moz_head_pf_status == "negative" ~ 0, !is.na(moz_head_pf_density) ~  moz_head_pf_density * 42894.74),
+             slept_net = factor(slept_net, levels = rev(c("Yes", "No")))) %>%
+      drop_na() %>%
+      group_by(sample_id_mosquito) %>%
+      filter(sum(match == "yes") > 1) %>%
+        ungroup() %>%
+        filter(match == "No") %>%
+        mutate(sample_id_mosquito = paste0(sample_id_mosquito, "_1")) %>%
+        bind_rows(df %>%
+      select(sample_id_mosquito, match, age_cat, gender, slept_net, pf_pcr_infection_status, moz_head_pf_density, moz_head_pf_status, species, missing_data, multisource, locus_count) %>%
+      filter(species %in% c("An. funestus", "An. gambiae SS")) %>% 
+      mutate(moz_head_pf_density = case_when(is.na(moz_head_pf_density) & moz_head_pf_status == "negative" ~ 0, !is.na(moz_head_pf_density) ~  moz_head_pf_density * 42894.74),
+             slept_net = factor(slept_net, levels = rev(c("Yes", "No")))) %>%
+      drop_na() %>%
+      group_by(sample_id_mosquito) %>%
+      filter(sum(match == "yes") > 1) %>%
+        ungroup() %>%
+        filter(match == "No") %>%
+        mutate(sample_id_mosquito = paste0(sample_id_mosquito, "_2")))
+  
+  # assign matches to new unique mozzie ids and add the appropriate 0's
+  multi <- df %>%
+      select(sample_id_mosquito, match, age_cat, gender, slept_net, pf_pcr_infection_status, moz_head_pf_density, moz_head_pf_status, species, missing_data, multisource, locus_count) %>%
+      filter(species %in% c("An. funestus", "An. gambiae SS")) %>% 
+      mutate(moz_head_pf_density = case_when(is.na(moz_head_pf_density) & moz_head_pf_status == "negative" ~ 0, !is.na(moz_head_pf_density) ~  moz_head_pf_density * 42894.74),
+             slept_net = factor(slept_net, levels = rev(c("Yes", "No")))) %>%
+      drop_na() %>%
+      group_by(sample_id_mosquito) %>%
+      filter(sum(match == "yes") > 1) %>%
+      mutate(hh_index = row_number()) %>%
+        ungroup() %>%
+        filter(match == "yes") %>%
+        group_by(sample_id_mosquito) %>%
+        mutate(sample_id_mosquito = case_when(hh_index == min(hh_index) ~ paste0(sample_id_mosquito, "_1"),
+                                                 hh_index == max(hh_index) ~ paste0(sample_id_mosquito, "_2"))) %>%
+        ungroup() %>%
+        bind_rows(df %>%
+      select(sample_id_mosquito, match, age_cat, gender, slept_net, pf_pcr_infection_status, moz_head_pf_density, moz_head_pf_status, species, missing_data, multisource, locus_count) %>%
+      filter(species %in% c("An. funestus", "An. gambiae SS")) %>% 
+      mutate(moz_head_pf_density = case_when(is.na(moz_head_pf_density) & moz_head_pf_status == "negative" ~ 0, !is.na(moz_head_pf_density) ~  moz_head_pf_density * 42894.74),
+             slept_net = factor(slept_net, levels = rev(c("Yes", "No")))) %>%
+      drop_na() %>%
+      group_by(sample_id_mosquito) %>%
+      filter(sum(match == "yes") > 1) %>%
+      mutate(hh_index = row_number()) %>%
+        ungroup() %>%
+        filter(match == "yes") %>%
+        group_by(sample_id_mosquito) %>%
+        mutate(sample_id_mosquito = case_when(hh_index == min(hh_index) ~ paste0(sample_id_mosquito, "_2"),
+                                                 hh_index == max(hh_index) ~ paste0(sample_id_mosquito, "_1")),
+               match = "No") %>%
+        ungroup()) %>%
+        bind_rows(multi_no_match)
+  
+  modeldat <- df %>%
+      select(sample_id_mosquito, match, age_cat, gender, slept_net, pf_pcr_infection_status, moz_head_pf_density, moz_head_pf_status, species, missing_data, multisource, locus_count) %>%
+      filter(species %in% c("An. funestus", "An. gambiae SS")) %>% 
+      mutate(moz_head_pf_density = case_when(is.na(moz_head_pf_density) & moz_head_pf_status == "negative" ~ 0, !is.na(moz_head_pf_density) ~  moz_head_pf_density * 42894.74),
+             slept_net = factor(slept_net, levels = rev(c("Yes", "No")))) %>%
+      drop_na() %>%
+      group_by(sample_id_mosquito) %>%
+      filter(sum(match == "yes") == 1) %>%
+      ungroup() %>%
+      bind_rows(multi) %>%
+      mutate(index_mosquito = as.numeric(factor(sample_id_mosquito)),
+             choice = as.numeric(match == "yes"),
+             species = factor(species, levels = c("An. gambiae SS", "An. funestus"))) %>% 
+      group_by(index_mosquito, {{hu_var}}) %>%
+      mutate(n = n(),
+             choice = case_when(sum(choice) > 0 ~ 1,
+                                TRUE ~ 0)) %>%
+      select(sample_id_mosquito, {{hu_var}}, moz_head_pf_density, moz_head_pf_status, species, multisource, missing_data,multisource, locus_count, index_mosquito, choice, n) %>%
+      distinct() %>%
+      group_by(index_mosquito) %>%
+      mutate(weight = n/sum(n)) %>%
+      ungroup()
+
+  return(modeldat)
+}
+
+
+```
+
+# Get data
+
+```{r}
+gender <- get_modeldat(df = model_dat_long, hu_var = gender) 
+
+age <- get_modeldat(df = model_dat_long, hu_var = age_cat) %>%
+  mutate(age_cat = factor(age_cat, levels = c(">15", "<5", "5-15")))
+
+hu_inf <- get_modeldat(df = model_dat_long, hu_var = pf_pcr_infection_status)
+
+net <- get_modeldat(df = model_dat_long, hu_var = slept_net)
+```
+
+
+# Cat Spz: all mozzie covariates
+
+## Hu infection
+```{r}
+m_inf_all <- mlogit(choice ~ 1 | multisource + moz_head_pf_status + species, chid.var = "index_mosquito", alt.var = 'pf_pcr_infection_status', weights = weight, data = hu_inf)
+
+summary(m_inf_all)
+
+exp(coef(m_inf_all))
+```
+
+
+## Gender
+
+```{r}
+m_gender_all <- mlogit(choice ~ 1 | multisource + moz_head_pf_status + species, chid.var = "index_mosquito", alt.var = 'gender', weights = weight, data = gender)
+
+summary(m_gender_all)
+
+exp(coef(m_gender_all))
+```
+
+## Net
+
+```{r}
+m_net_all <- mlogit(choice ~ 1 | multisource + moz_head_pf_status + species, chid.var = "index_mosquito", alt.var = 'slept_net', weights = weight, data = net)
+
+summary(m_net_all)
+
+exp(coef(m_net_all))
+```
+
+## Age
+
+```{r}
+m_age_all <- mlogit(choice ~ 1 | multisource + moz_head_pf_status + species, chid.var = "index_mosquito", alt.var = 'age_cat', weights = weight, data = age)
+
+summary(m_age_all)
+
+exp(coef(m_age_all))
+```
+
+## Put it together
+
+```{r}
+m_out_all <- bind_rows(tidy(m_gender_all, conf.int = TRUE),
+                   tidy(m_age_all, conf.int = TRUE),
+                   tidy(m_inf_all, conf.int = TRUE),
+                   tidy(m_net_all, conf.int = TRUE)) %>%
+  filter(!grepl('Intercept', term)) %>%
+  mutate(estimate = exp(estimate),
+         conf.low = exp(conf.low),
+         conf.high = exp(conf.high),
+         hu_char = gsub('.*:', '', term), 
+         age = case_when(hu_char == "<5" ~ "< 5y",
+                         hu_char == "5-15" ~ "5 - 15y"),
+         hu_char = case_when(hu_char == 'Yes' ~ 'Net\nvs. no net (ref)',
+                             hu_char == "positive" ~ 'Pf infection vs.\nNo Pf (ref)',
+                             hu_char == "<5" ~ "Age vs.\n> 15y (ref)",
+                             hu_char == "5-15" ~ "Age vs.\n> 15y (ref)",
+                             hu_char == "Male" ~ "Male vs.\nFemale (ref)"),
+         hu_char = factor(hu_char, levels = c("Age vs.\n> 15y (ref)", "Male vs.\nFemale (ref)", "Net\nvs. no net (ref)", 
+"Pf infection vs.\nNo Pf (ref)")),
+         moz_char = gsub(':.*', '', term),
+         moz_char = case_when(moz_char == "speciesAn. funestus" ~ "Mosquito species:\nAn. funestus vs.\nAn. gambiae SS (ref)",
+                              moz_char == "multisourceYes" ~ "Multisource bloodmeal:\n Yes vs. No (ref)",
+                              moz_char == "moz_head_pf_statuspositive" ~ "Sporozoites in head-thorax:\npositive vs negative (ref)",
+                              moz_char == "moz_head_pf_density" ~ "Sporozoites in\nhead-thorax"),
+moz_char = factor(moz_char, levels = c("Mosquito species:\nAn. funestus vs.\nAn. gambiae SS (ref)", 
+"Multisource bloodmeal:\n Yes vs. No (ref)", 
+"Sporozoites in head-thorax:\npositive vs negative (ref)", "Sporozoites in\nhead-thorax"))) %>%
+  select(-term)
+
+m_out_all
+```
+
+```{r}
+moz_plot <- m_out_all %>%
+  mutate(sig = case_when(p.value < 0.05 ~ 1,
+                         TRUE ~ 0)) %>%
+  ggplot() +
+  facet_grid(.~fct_rev(hu_char), scales = "free") +
+  geom_vline(xintercept = 1, linetype = 'dashed') +
+  geom_pointrange(aes(x = estimate, xmin = conf.low, xmax = conf.high, y = fct_rev(moz_char), color = fct_rev(age)), position = position_dodge2(width = 0.5)) +
+  scale_color_manual(values = c("darkred", "navy"), breaks = c("< 5y", "5 - 15y"), na.value = "black")+
+  labs(x = "Relative risk ratio", y = "Mosquito characteristic", title = "Human characteristic", color = "Age") +
+  scale_x_continuous(trans = "log", breaks =  scales::breaks_extended(n = 4)) +
+  theme_minimal() +
+  theme(strip.text.y = element_blank(), panel.border = element_rect(color = "black", fill = NA), axis.text.y = element_text(color = "black"), plot.title = element_text(hjust = 0.5, size = 11))
+```
+
+# Continuous Spz: all mozzie covariates
+
+## Hu infection
+```{r}
+m_inf_all_spz <- mlogit(choice ~ 1 | multisource + moz_head_pf_density + species, chid.var = "index_mosquito", alt.var = 'pf_pcr_infection_status', weights = weight, data = hu_inf)
+
+summary(m_inf_all_spz)
+
+exp(coef(m_inf_all_spz))
+```
+
+#### Per 100 spz
+
+```{r}
+m_inf_all_100spz <- mlogit(choice ~ 1 | multisource + moz_head_pf_density + species, chid.var = "index_mosquito", alt.var = 'pf_pcr_infection_status', weights = weight, data = hu_inf %>% mutate(moz_head_pf_density = moz_head_pf_density/100))
+
+summary(m_inf_all_100spz)
+
+exp(coef(m_inf_all_100spz))
+
+tidy(m_inf_all_100spz, conf.int = TRUE) %>%
+  mutate(estimate = exp(estimate),
+         conf.low = exp(conf.low),
+         conf.high = exp(conf.high))
+```
+
+
+
+## Gender
+
+```{r}
+m_gender_all_spz <- mlogit(choice ~ 1 | multisource + moz_head_pf_density + species, chid.var = "index_mosquito", alt.var = 'gender', weights = weight, data = gender)
+
+summary(m_gender_all_spz)
+
+exp(coef(m_gender_all_spz))
+```
+
+## Net
+
+```{r}
+m_net_all_spz <- mlogit(choice ~ 1 | multisource + moz_head_pf_density + species, chid.var = "index_mosquito", alt.var = 'slept_net', weights = weight, data = net)
+
+summary(m_net_all_spz)
+
+exp(coef(m_net_all_spz))
+```
+
+## Age
+
+```{r}
+m_age_all_spz <- mlogit(choice ~ 1 | multisource + moz_head_pf_density + species, chid.var = "index_mosquito", alt.var = 'age_cat', weights = weight, data = age)
+
+summary(m_age_all_spz)
+
+exp(coef(m_age_all_spz))
+```
+
+
+## Put it together
+
+```{r}
+m_out_all_spz <- bind_rows(tidy(m_gender_all_spz, conf.int = TRUE),
+                   tidy(m_age_all_spz, conf.int = TRUE),
+                   tidy(m_inf_all_spz, conf.int = TRUE),
+                   tidy(m_net_all_spz, conf.int = TRUE)) %>%
+  filter(!grepl('Intercept', term)) %>%
+  mutate(estimate = exp(estimate),
+         conf.low = exp(conf.low),
+         conf.high = exp(conf.high),
+         hu_char = gsub('.*:', '', term), 
+         age = case_when(hu_char == "<5" ~ "< 5y",
+                         hu_char == "5-15" ~ "5 - 15y"),
+         hu_char = case_when(hu_char == 'Yes' ~ 'Net\nvs. no net (ref)',
+                             hu_char == "positive" ~ 'Pf infection vs.\nNo Pf (ref)',
+                             hu_char == "<5" ~ "Age vs.\n> 15y (ref)",
+                             hu_char == "5-15" ~ "Age vs.\n> 15y (ref)",
+                             hu_char == "Male" ~ "Male vs.\nFemale (ref)"),
+                             hu_char = factor(hu_char, levels = c("Age vs.\n> 15y (ref)", "Male vs.\nFemale (ref)", "Net\nvs. no net (ref)", "Pf infection vs.\nNo Pf (ref)")),
+         moz_char = gsub(':.*', '', term),
+         moz_char = case_when(moz_char == "speciesAn. funestus" ~ "Mosquito species:\nAn. funestus vs.\nAn. gambiae SS (ref)",
+                              moz_char == "multisourceYes" ~ "Multisource bloodmeal:\n Yes vs. No (ref)",
+                              moz_char == "moz_head_pf_statuspositive" ~ "Sporozoites in head-thorax:\npositive vs negative (ref)",
+                              moz_char == "moz_head_pf_density" ~ "Sporozoites in\nhead-thorax"),
+moz_char = factor(moz_char, levels = c("Mosquito species:\nAn. funestus vs.\nAn. gambiae SS (ref)", 
+"Multisource bloodmeal:\n Yes vs. No (ref)", 
+"Sporozoites in head-thorax:\npositive vs negative (ref)", "Sporozoites in\nhead-thorax"))) %>%
+  select(-term)
+
+m_out_all_spz |> 
+  select(moz_char, hu_char, age, estimate, conf.low, conf.high) |> 
+  mutate(estimate = case_when(moz_char == 'Sporozoites in\nhead-thorax' ~ exp(log(estimate)*100),
+                              TRUE ~ estimate),
+         conf.low = case_when(moz_char == 'Sporozoites in\nhead-thorax' ~ exp(log(conf.low)*100),
+                              TRUE ~ conf.low),
+         conf.high = case_when(moz_char == 'Sporozoites in\nhead-thorax' ~ exp(log(conf.high)*100),
+                              TRUE ~ conf.high),
+         moz_char = case_when(moz_char == 'Sporozoites in\nhead-thorax' ~ 'Sporozoites in\nhead-thorax per 100',
+                              TRUE ~ moz_char)) 
+```
+
+## Plotting probabilities
+
+```{r}
+eff_overall <- ggeffect(m_inf_all_spz, terms = c("moz_head_pf_density[0:1000, by = 1]"))
+
+spz_overall_prob <- ggplot(eff_overall, aes(x = x, y = predicted)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.1, color = NA) +
+  scale_y_continuous(limits = c(0.5,1)) +
+  scale_x_continuous(limits = c(0,750))+
+  labs(x = "Sporozoites per head-thorax", y = "Probability of biting\nan infected person") +
+  theme_bw() +
+  theme(legend.position = c(0.7,0.2), legend.box.background = element_rect(color = "black"))
+```
+
+
+```{r}
+eff_species <- ggeffect(m_inf_all_spz, terms = c("moz_head_pf_density[0:1000, by = 1]", "species"))
+
+spz_species_prob <- ggplot(eff_species, aes(x = x, y = predicted, color = group)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = group), alpha = 0.1, color = NA) +
+  scale_y_continuous(limits = c(0.5,1)) +
+  scale_x_continuous(limits = c(0,750))+
+  scale_color_manual(values = c('An. gambiae SS' = 'forestgreen', 'An. funestus' = 'coral'))+
+  scale_fill_manual(values = c('An. gambiae SS' = 'forestgreen', 'An. funestus' = 'coral'))+
+  labs(x = "Sporozoites per head-thorax", y = "Probability of biting\nan infected person", color = "Species", fill = "Species") +
+  theme_bw() +
+  theme(legend.position = c(0.7,0.2), legend.box.background = element_rect(color = "black"))
+
+eff_multi <- ggeffect(m_inf_all_spz, terms = c("moz_head_pf_density[0:1000, by = 1]", "multisource"))
+
+spz_multi_prob <- ggplot(eff_multi, aes(x = x, y = predicted, color = group)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = group), alpha = 0.1, color = NA) +
+  scale_y_continuous(limits = c(0.5,1)) +
+  scale_x_continuous(limits = c(0,750))+
+  scale_color_manual(values = c('Yes' = 'cadetblue3', 'No' = 'pink3')) +
+    scale_fill_manual(values = c('Yes' = 'cadetblue3', 'No' = 'pink3')) +
+  labs(x = "Sporozoites per head-thorax", y = "Probability of biting\nan infected person", color = "Multisource", fill = "Multisource") +
+  theme_bw() +
+  theme(legend.position = c(0.8,0.2), legend.box.background = element_rect(color = "black"))
+```
+
+
+# Main plot
+
+```{r, fig.width=10, fig.height=3}
+(dc_plot <- ggarrange(moz_plot + theme(legend.box.spacing = unit(0, "pt")),
+          ggarrange(NULL, spz_overall_prob, ncol = 1, heights = c(1, 5)),
+          nrow = 1,
+          widths = c(2.5, 1),
+          labels = 'AUTO'))
+
+ggsave(plot = dc_plot, filename = 'analysis/manuscript_figures/figures/discrete_choice.png',
+       width = 10, height = 3)
+```
+
+```{r, fig.width=6, fig.height=3}
+(spz_moz_char <- ggarrange(spz_species_prob +
+                      labs(x = ""),
+                    spz_multi_prob +
+                      labs(x = "", y = ""),
+                    labels = 'AUTO',
+                    widths = c(1.05,1)) |> 
+  annotate_figure(bottom = text_grob("Sporozoites per head-thorax", hjust = 0.5, vjust = -1.5)))
+
+ggsave(plot = spz_moz_char, filename = 'analysis/manuscript_figures/figures/spz_by_moz_char.png', width = 6, height = 3)
+```
+
+
+
+

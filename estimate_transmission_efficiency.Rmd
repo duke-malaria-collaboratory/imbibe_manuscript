@@ -1,0 +1,184 @@
+---
+title: "Human-to-mosquito transmission efficiency"
+author: "Zena Lapp"
+date: "2023-09-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(modelr)
+
+# set seed
+set.seed(1234)
+
+# read in data
+reared <- read_csv('analysis/clean_data/data/reared.csv') |> 
+  filter(day_processed >= 6)
+processed <- read_csv('analysis/clean_data/data/female_anopheles.csv') |> 
+  filter(reared == 'no')
+str_matches <- read_csv('analysis/clean_data/data/mosquito_human_matches.csv')
+```
+
+```{r}
+# function to calculate the probability that a mosquito will become infected after biting an infected person
+calc_prob_mosq_inf_1_bite <- function(prob_mosq_inf, 
+                                      prob_b1i, 
+                                      prob_b2i){
+  a <- -prob_b2i
+  b <- prob_b1i + 2*prob_b2i
+  c <- -prob_mosq_inf
+  sqrt_part <- sqrt(b^2 - 4*a*c)
+  pos <- (-b + sqrt_part)/(2*a)
+  neg <- (-b - sqrt_part)/(2*a)
+  both <- c(pos, neg)
+  both[both >= 0 & both <= 1]
+}
+```
+
+### Number of mosquitoes that bit n infected people
+
+```{r}
+str_matches |> 
+  mutate(complete = ifelse(locus_count == 9, 'yes', 'no')) |> 
+  group_by(sample_id_mosquito, complete, pf_pcr_infection_status) |> 
+  tally() |> 
+  drop_na() |>
+  pivot_wider(names_from = pf_pcr_infection_status, values_from = n, values_fill = 0) |> 
+  group_by(complete, positive, negative) |>
+  tally() |>
+  pivot_wider(names_from = complete, values_from = n, values_fill = 0) |> 
+  mutate(bite_type = case_when(positive == 0 ~ 'only negative',
+                          positive == 1 ~ 'one positive',
+                          positive == 2 ~ 'two positives')) |> 
+  mutate(complete_only = yes, all = yes + no) |> 
+  group_by(bite_type) |> 
+  summarize(complete_only = sum(complete_only),
+            all = sum(all)) |>
+  mutate(tot_complete = sum(complete_only),
+         prop_complete = complete_only/tot_complete,
+         tot_all = sum(all),
+         prop_all = all/tot_all) |> 
+  ungroup()
+```
+
+```{r}
+# function to summarize data 
+summarize_data <- function(reared, processed, str_matches){
+  mosq_inf_summary <- reared |> 
+    group_by(pf_pcr_infection_status) |> 
+    tally() |> 
+    drop_na() |> 
+    pivot_wider(names_from = pf_pcr_infection_status, values_from = n, values_fill = 0) |>
+    rowwise() |> 
+    mutate(prop = positive/(positive + negative)) |> 
+    ungroup()
+  
+  abd_status_summary <- processed |> 
+    group_by(abdominal_status) |> 
+    tally() |> 
+    ungroup() |> 
+    mutate(prop = n/sum(n))
+  
+  bite_infected_summary <- str_matches |> 
+    filter(locus_count == 9) |>
+    group_by(sample_id_mosquito, pf_pcr_infection_status) |>
+    tally() |> 
+    drop_na() |> 
+    pivot_wider(names_from = pf_pcr_infection_status, values_from = n, values_fill = 0) |> 
+    group_by(positive, negative) |> 
+    tally() |> 
+    mutate(bite_type = case_when(positive == 0 ~ 'only negative',
+                            TRUE ~ '> 0 positive')) |> 
+    group_by(bite_type) |> 
+    summarize(n = sum(n)) |> 
+    ungroup() |> 
+    pivot_wider(names_from = bite_type, values_from = n, values_fill = 0) |>
+    rowwise() |> 
+    mutate(prop_pos = `> 0 positive`/(`> 0 positive` + `only negative`)) |> 
+    ungroup()
+  
+  num_bite_infected_summary <- str_matches |> 
+    filter(locus_count == 9) |>
+    group_by(sample_id_mosquito, pf_pcr_infection_status) |> 
+    tally() |> 
+    drop_na() |> 
+    pivot_wider(names_from = pf_pcr_infection_status, values_from = n, values_fill = 0) |> 
+    group_by(positive, negative) |> 
+    tally() |> 
+    mutate(bite_type = case_when(positive == 0 ~ 'only negative',
+                            positive == 1 ~ 'one positive',
+                            positive == 2 ~ 'two positives')) |> 
+    group_by(bite_type) |> 
+    summarize(n = sum(n)) |> 
+    mutate(tot = sum(n),
+           prop = n/tot) |> 
+    ungroup()
+  
+  # proportion of reared mosquitoes that were infected
+  prop_inf_all <- mosq_inf_summary |> pull(prop)
+  
+  prop_bloodfed <- 1 - (abd_status_summary |> 
+    filter(abdominal_status == 'Unfed') |> 
+    pull(prop))
+  
+  # estimated proportion of bloodfed mosquitoes that were infected
+  prop_inf <- prop_inf_all/prop_bloodfed
+  
+  # proportion of immediately processed mosquitoes that were bloodfed
+  
+  # proportion of str-typed mosquitoes that bit at least one infected person
+  prop_bit_gt0_inf <- bite_infected_summary |> pull(prop_pos)
+ 
+  # estimated proportion of mosquitoes that bit two and one infected person, respectively
+  prop_bite_2_inf <- num_bite_infected_summary |> filter(bite_type == 'two positives') |> pull(prop)
+  prop_bite_1_inf <- num_bite_infected_summary |> filter(bite_type == 'one positive') |> pull(prop)
+  
+  return(list(prop_inf=prop_inf, 
+              prop_bit_gt0_inf=prop_bit_gt0_inf, 
+              prop_bite_1_inf=prop_bite_1_inf, 
+              prop_bite_2_inf=prop_bite_2_inf))
+}
+```
+
+```{r}
+dat <- summarize_data(reared, processed, str_matches)
+```
+
+### Not taking into account multi-source bites
+
+```{r}
+# no multi-source
+dat$prop_inf/dat$prop_bit_gt0_inf
+```
+
+### Taking into account multi-source bites
+
+```{r}
+# including multi-source
+prob_infected <- calc_prob_mosq_inf_1_bite(dat$prop_inf, dat$prop_bite_1_inf, dat$prop_bite_2_inf)
+prob_infected
+```
+
+```{r}
+prob_infected_boot <- sapply(1:100, function(x){
+  reared_boot <- reared |> resample_bootstrap() |> as_tibble()
+  processed_boot <- processed |> resample_bootstrap() |> as_tibble()
+  str_boot <- str_matches |> resample_bootstrap() |> as_tibble()
+  dat <- summarize_data(reared_boot, processed_boot, str_boot)
+  calc_prob_mosq_inf_1_bite(dat$prop_inf, dat$prop_bite_1_inf, dat$prop_bite_2_inf)
+})
+```
+
+### 95% bootstrapped CI
+
+```{r}
+quantile(prob_infected_boot, 0.025)
+quantile(prob_infected_boot, 0.975)
+```
+
+

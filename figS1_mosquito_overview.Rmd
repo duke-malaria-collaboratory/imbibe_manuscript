@@ -1,0 +1,56 @@
+---
+title: "Mosquito overview"
+author: "Zena Lapp"
+date: "2023-10-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+
+# set plotting theme
+theme_set(theme_bw() + 
+            theme(text = element_text(size = 15),
+                  strip.background = element_rect(fill = 'white', color = 'white')))
+
+f_anoph <- read_csv('analysis/clean_data/data/female_anopheles.csv')
+```
+
+```{r}
+nrow(f_anoph)
+f_anoph |> group_by(species) |> tally()
+f_anoph |> group_by(reared) |> tally() |> ungroup() |> mutate(prop = n/sum(n))
+```
+
+```{r, fig.width = 6.5, fig.height = 3.5}
+(moz_overview <- ggarrange(f_anoph |> 
+  mutate(species = factor(ifelse(species %in% c('An. gambiae SS', 'An. funestus'), species, 'Other')),
+         species = factor(species, levels = rev(levels(species))),
+         reared = ifelse(reared == 'yes', 'Reared', 'Immediately processed')) |> 
+  ggplot(aes(x = collection_date, fill = species)) +
+  facet_grid(reared~., scales = 'free', space = 'free') +
+  geom_histogram(binwidth = 14) +
+  scale_fill_grey(start = 0.8, end = 0.2) +
+  scale_x_date(date_breaks = "6 months", date_labels =  "%b %Y") +
+  labs(x = 'Collection date', y = 'Number of female\nAnopheles collected', fill = 'Species'),
+
+f_anoph |> 
+  mutate(species = factor(ifelse(species %in% c('An. gambiae SS', 'An. funestus'), species, 'Other')),
+         species = factor(species, levels = rev(levels(species))),
+         reared = ifelse(reared == 'yes', 'Reared', 'Immediately processed')) |> 
+  ggplot(aes(x = village, fill = species)) +
+  geom_bar() +
+  scale_fill_grey(start = 0.8, end = 0.2) +
+  labs(x = 'Village', y = 'Number of female\nAnopheles collected', fill = 'Species'), 
+common.legend = TRUE, labels = 'AUTO'))
+
+ggsave(plot = moz_overview, filename = 'analysis/manuscript_figures/figures/mosquito_overview.png',
+       width = 6.5, height = 3.5) 
+```
+
+

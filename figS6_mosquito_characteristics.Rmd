@@ -1,0 +1,105 @@
+---
+title: "Mosquito features"
+author: "Zena Lapp"
+date: "2023-11-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+
+# set plotting theme
+theme_set(theme_bw() + 
+            theme(text = element_text(size = 15),
+                  strip.background = element_rect(fill = 'white', color = 'white')))
+
+moz_dat <- read_csv('analysis/clean_data/data/model_dat_long.csv') |> 
+  group_by(sample_id_mosquito, multisource, species, moz_head_pf_status, moz_head_pf_density) |> 
+  summarize() |> 
+  filter(species %in% c('An. gambiae SS', 'An. funestus')) |> 
+  mutate(moz_head_pf_density = ifelse(moz_head_pf_status == 'negative', 1e-10, moz_head_pf_density))
+```
+
+### Do infected mosquitoes take more multi-source bites?
+
+```{r}
+moz_dat |> 
+  group_by(sample_id_mosquito, multisource, moz_head_pf_status, species) |>
+  summarize() |> 
+  group_by(multisource, moz_head_pf_status, species) |> 
+  tally() |> 
+  drop_na() |> 
+  pivot_wider(names_from = multisource, values_from = n) |> 
+  ungroup() |> 
+  filter(species == 'An. gambiae SS') |> 
+  select(-moz_head_pf_status, -species) |> 
+  fisher.test()
+
+moz_dat |> 
+  group_by(sample_id_mosquito, multisource, moz_head_pf_status, species) |>
+  summarize() |> 
+  group_by(multisource, moz_head_pf_status, species) |> 
+  tally() |> 
+  drop_na() |> 
+  pivot_wider(names_from = multisource, values_from = n) |> 
+  ungroup() |> 
+  filter(species == 'An. funestus') |> 
+  select(-moz_head_pf_status, -species) |> 
+  fisher.test()
+```
+
+```{r}
+moz_plot <- moz_dat |> 
+  filter(moz_head_pf_status == "positive") |> 
+  ggplot(aes(x = multisource, y = moz_head_pf_density)) +
+  facet_grid(~species) +
+  stat_compare_means() +
+  geom_violin() +
+  geom_jitter(alpha = 0.5, width = 0.25, height = 0) +
+  stat_mean(aes(y = moz_head_pf_density, col = 'mean'), size = 3) +
+  scale_color_manual(values = 'red') +
+  # geom_boxplot() +
+  scale_y_log10() +
+  labs(x = 'Multisource', y = 'Sporozoite density in head-thorax', col = '')
+```
+
+```{r}
+# discrete version 
+moz_discrete <- moz_dat %>% 
+  drop_na() |> 
+  ggplot(aes(x = moz_head_pf_status, fill = multisource)) +
+  facet_grid(~species) +
+  geom_bar(position = 'fill') +
+  geom_text(aes(label = after_stat(count)), position = position_fill(vjust = 0.5), 
+            stat = "count", col = 'white') +
+  scale_fill_grey(start = 0.7, end = 0.3) +
+<<<<<<< HEAD
+  labs(x = 'Mosquito head Pf infection status', y = 'Proportion of samples', fill = 'Multisource'))
+
+ 
+fisher.test(moz_dat$moz_head_pf_status[moz_dat$species == "An. funestus"], moz_dat$multisource[moz_dat$species == "An. funestus"])
+
+fisher.test(moz_dat$moz_head_pf_status[moz_dat$species == "An. gambiae SS"], moz_dat$multisource[moz_dat$species == "An. gambiae SS"])
+
+=======
+  labs(x = 'Mosquito head Pf infection status', y = 'Proportion of samples', fill = 'Multisource')
+>>>>>>> d98462f57f60f5ad016e5b5ba0bd737715c5f8da
+```
+
+# Plot
+
+```{r, fig.width=8, fig.height=5}
+(moz <- ggarrange(moz_discrete + theme(legend.position = 'bottom'), 
+                  moz_plot + theme(legend.position = 'bottom'),
+                  labels = 'AUTO',
+                  ncol = 2))
+
+ggsave(plot = moz, filename = 'analysis/manuscript_figures/figures/mosquito_characteristics.png', 
+       width = 8, height = 5)
+```
+

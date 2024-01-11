@@ -1,0 +1,57 @@
+---
+title: "Human overview"
+author: "Zena Lapp"
+date: "2023-11-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+
+# set plotting theme
+theme_set(theme_bw() + 
+            theme(text = element_text(size = 15),
+                  strip.background = element_rect(fill = 'white', color = 'white')))
+
+hu_pos <- read_csv('analysis/clean_data/data/hu_pos.csv') %>%
+  mutate(sick_visit = ifelse(str_detect(dbs_barcode, "R"), 
+                             'Passive\ncase\ndetection',
+                             'Active\ncase\ndetection')) |> 
+  filter(collection_date >= ymd("2020-07-01"),
+         collection_date <= ymd("2021-09-30")) %>%
+  mutate(pcr = case_when(pf_pcr_infection_status == "negative" ~ "Pf-negative",
+                         pf_pcr_infection_status == "positive" ~ "Pf-positive"))
+```
+
+
+```{r}
+hu_pos |> 
+  group_by(pf_pcr_infection_status) |> 
+  tally() |> 
+  ungroup() |> 
+  mutate(tot = sum(n),
+         prop = n/tot)
+```
+
+
+```{r, fig.width=7, fig.height=5.5}
+by_month <- function(x, n =1){
+  seq(min(x,na.rm=TRUE), max(x, na.rm=TRUE), by = paste0(n, " months"))
+}
+
+(hu_overview <- hu_pos %>%
+  ggplot(aes(x = collection_date, fill = pcr)) +
+  geom_histogram(breaks = by_month(hu_pos$collection_date), linewidth = 0.2, color = "white") +
+  labs(y = "Number of samples", x = "Date", fill = "") +
+  scale_fill_manual(values = c("gray90", "black")) +
+  facet_grid(sick_visit~., scales = 'free', space = 'free') +
+  scale_x_date(date_breaks = "3 months", date_labels =  "%b %Y", limits = c(ymd("2020-07-01", "2021-09-30"))) +
+  theme(strip.text.y = element_text(angle = 0), legend.position = "top"))
+
+ggsave(plot = hu_overview, filename = 'analysis/manuscript_figures/figures/human_overview.png', 
+       width = 7, height = 5.5)
+```
