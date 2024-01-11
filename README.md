@@ -1,1 +1,1 @@
-Data and code related to the imbibe manuscript.
+Code and figures related to the imbibe manuscript.
